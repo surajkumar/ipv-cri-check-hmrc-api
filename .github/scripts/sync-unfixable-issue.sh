@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Sync a single tracking issue (labelled `auto-audit-unfixable`) with the current
+# list of vulnerabilities that have no upstream fix.
+#
+#   - opens the issue if missing and there are unfixables
+#   - edits the body in place if it already exists
+#   - closes it once the list goes empty
+#
+# Reads audit-summary.json from the working directory. Requires GH_TOKEN.
+set -euo pipefail
+
+LABEL="auto-audit-unfixable"
+TITLE="auto-audit: unfixable npm vulnerabilities"
+
+gh label create "$LABEL" --color B60205 \
+  --description "Vulnerabilities with no upstream fix available" 2>/dev/null || true
+
+EXISTING=$(gh issue list --label "$LABEL" --state open --json number --jq '.[0].number')
+COUNT=$(node -e "console.log(require('./audit-summary.json').unfixable.length)")
+
+if [ "$COUNT" = "0" ]; then
+  if [ -n "$EXISTING" ]; then
+    gh issue close "$EXISTING" \
+      --comment "All previously unfixable vulnerabilities now have upstream fixes available."
+  fi
+  exit 0
+fi
+
+LIST=$(node <<'JS'
+const s = require('./audit-summary.json');
+const out = s.unfixable.map(e => {
+  const head = `### \`${e.name}\` - ${e.severity}` + (e.range ? ` (vulnerable: \`${e.range}\`)` : '');
+  const advs = (e.advisories || []).map(a => {
+    const cvss = a.cvss != null ? ` · CVSS ${a.cvss}` : '';
+    return `- [${a.title}](${a.url}) - ${a.severity}${cvss}`;
+  }).join('\n');
+  return head + '\n' + (advs || '_(no advisory details captured)_');
+}).join('\n\n');
+console.log(out);
+JS
+)
+
+RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+BODY=$'`npm audit` reports vulnerabilities with **no upstream fix available** (`fixAvailable: false`). These need manual triage - pinning, patching, swapping the dependency, or accepting the risk.\n\n'"$LIST"$'\n\n---\nLast updated by run: '"$RUN_URL"
+
+if [ -n "$EXISTING" ]; then
+  gh issue edit "$EXISTING" --body "$BODY"
+else
+  gh issue create --title "$TITLE" --label "$LABEL" --body "$BODY"
+fi
