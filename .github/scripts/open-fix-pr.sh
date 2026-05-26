@@ -39,8 +39,9 @@ npm ci
 
 # Apply the fix.
 if [ "$BUCKET" = "safe" ]; then
-  # in-range fixes - let npm pick everything
+  # in-range fixes - let npm pick everything, including workspace packages
   npm audit fix || true
+  npm audit fix --workspaces || true
 else
   TARGETS=$(node -e "console.log(require('./audit-summary.json').${BUCKET}.map(e=>e.target).join(' '))")
   if [ -z "$TARGETS" ]; then
@@ -51,14 +52,17 @@ else
   npm install --save-exact $TARGETS
 fi
 
-if git diff --quiet -- package.json package-lock.json; then
+# Collect all changed package.json files (root + workspaces)
+CHANGED_PKGS=$(git diff --name-only | grep -E '(^|/)package\.json$' || true)
+if [ -z "$CHANGED_PKGS" ] && git diff --quiet -- package-lock.json; then
   echo "No changes produced; skipping PR."
   exit 0
 fi
 
 # Skip if the remote stable branch already has the same fix.
 if git fetch origin "$BRANCH" 2>/dev/null; then
-  if git diff --quiet "origin/$BRANCH" -- package.json package-lock.json; then
+  REMOTE_DIFF=$(git diff --name-only "origin/$BRANCH" | grep -E '(^|/)package(-lock)?\.json$' || true)
+  if [ -z "$REMOTE_DIFF" ]; then
     echo "Remote branch $BRANCH already has these fixes; nothing to do."
     exit 0
   fi
@@ -73,7 +77,9 @@ LIST=$(node -e "
   ).join('\n'));
 ")
 
-git add package.json package-lock.json
+# Stage root + any workspace package.json files that changed
+# shellcheck disable=SC2046
+git add package-lock.json $(git diff --name-only | grep -E '(^|/)package\.json$' || true)
 git commit -m "$COMMIT_MSG"
 git push --force-with-lease origin "$BRANCH"
 
