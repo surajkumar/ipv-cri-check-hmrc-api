@@ -40,8 +40,7 @@ npm ci
 # Apply the fix.
 if [ "$BUCKET" = "safe" ]; then
   # in-range fixes - let npm pick everything, including workspace packages
-  npm audit fix || true
-  npm audit fix --workspaces || true
+  npm audit fix --workspaces --include-workspace-root || true
 else
   TARGETS=$(node -e "console.log(require('./audit-summary.json').${BUCKET}.map(e=>e.target).join(' '))")
   if [ -z "$TARGETS" ]; then
