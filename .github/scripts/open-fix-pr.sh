@@ -42,13 +42,58 @@ if [ "$BUCKET" = "safe" ]; then
   # in-range fixes - let npm pick everything, including workspace packages
   npm audit fix --workspaces --include-workspace-root || true
 else
-  TARGETS=$(node -e "console.log(require('./audit-summary.json').${BUCKET}.map(e=>e.target).join(' '))")
-  if [ -z "$TARGETS" ]; then
-    echo "No targets resolved for bucket '$BUCKET'; nothing to do."
-    exit 0
-  fi
-  # shellcheck disable=SC2086
-  npm install --save-exact $TARGETS
+  # Install each target into whichever package.json actually declares it (workspace or root).
+  # Running `npm install` at root for a workspace dep would add it to root instead.
+  node -e "
+    const fs = require('fs');
+    const {execSync} = require('child_process');
+    const rootPkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+    const summary = JSON.parse(fs.readFileSync('audit-summary.json', 'utf8'));
+    const targets = [...new Set(summary['${BUCKET}'].map(e => e.target).filter(Boolean))];
+
+    if (!targets.length) {
+      console.log('No targets resolved for bucket ${BUCKET}; nothing to do.');
+      process.exit(0);
+    }
+
+    // Expand workspace glob patterns to concrete directories
+    const wsDirs = (rootPkg.workspaces || []).flatMap(pattern => {
+      try {
+        return execSync('ls -d ' + pattern + ' 2>/dev/null', {encoding: 'utf8'})
+          .trim().split('\n').filter(Boolean);
+      } catch { return []; }
+    });
+
+    for (const target of targets) {
+      // Handle scoped packages: @scope/name@version vs name@version
+      const atIdx = target.lastIndexOf('@');
+      const name = atIdx > 0 ? target.slice(0, atIdx) : target;
+
+      let placed = false;
+      for (const dir of wsDirs) {
+        try {
+          const wsPkg = JSON.parse(fs.readFileSync(dir + '/package.json', 'utf8'));
+          const deps = {...(wsPkg.dependencies || {}), ...(wsPkg.devDependencies || {})};
+          if (name in deps) {
+            console.log('Installing ' + target + ' in workspace ' + dir);
+            execSync('npm install --save-exact ' + target + ' -w ' + dir, {stdio: 'inherit'});
+            placed = true;
+            break;
+          }
+        } catch {}
+      }
+
+      if (!placed) {
+        const rootDeps = {...(rootPkg.dependencies || {}), ...(rootPkg.devDependencies || {})};
+        if (name in rootDeps) {
+          console.log('Installing ' + target + ' in root');
+          execSync('npm install --save-exact ' + target, {stdio: 'inherit'});
+        } else {
+          console.error('WARNING: ' + name + ' not a direct dep anywhere — skipping (transitive only).');
+        }
+      }
+    }
+  "
 fi
 
 # Collect all changed package.json files (root + workspaces)
